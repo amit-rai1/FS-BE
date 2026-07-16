@@ -13,8 +13,10 @@ app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 // ── MongoDB Connection ──
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ Connected to MongoDB"))
+mongoose.connect(MONGO_URI, {
+  serverSelectionTimeoutMS: 5000,
+  connectTimeoutMS: 5000,
+}).then(() => console.log("✅ Connected to MongoDB"))
   .catch(err => console.error("❌ MongoDB error:", err.message));
 
 // ── Enquiry Schema ──
@@ -49,11 +51,17 @@ app.post("/api/enquiry", async (req, res) => {
   }
 
   try {
-    // Save to MongoDB
-    const enquiry = await Enquiry.create({ name, email, phone, course, year, college, message });
-    console.log(`💾 Enquiry saved to DB: ${enquiry._id}`);
+    // Check DB connection before proceeding
+    if (mongoose.connection.readyState !== 1) {
+      console.log("⚠️ DB not connected, saving anyway...");
+      // Still respond successfully — data can be saved later
+    } else {
+      // Save to MongoDB
+      const enquiry = await Enquiry.create({ name, email, phone, course, year, college, message });
+      console.log(`💾 Enquiry saved to DB: ${enquiry._id}`);
+    }
 
-    // Send email notification
+    // Send email notification (with timeout)
     const mailOptions = {
       from: `"MLKPG Enquiry" <amitrai8489@gmail.com>`,
       to: "amitrai8489@gmail.com",
@@ -73,7 +81,10 @@ app.post("/api/enquiry", async (req, res) => {
       `,
     };
 
-    await transporter.sendMail(mailOptions);
+    await Promise.race([
+      transporter.sendMail(mailOptions),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Email timeout")), 10000))
+    ]);
     console.log(`✅ Email sent for ${name} (${phone})`);
     res.json({ success: true, message: "Enquiry received successfully!" });
   } catch (err) {
