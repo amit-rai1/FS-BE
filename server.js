@@ -65,6 +65,20 @@ const paymentSchema = new mongoose.Schema({
 
 const Payment = mongoose.model("Payment", paymentSchema);
 
+// ── Attendance Schema ──
+const attendanceSchema = new mongoose.Schema({
+  studentId: { type: mongoose.Schema.Types.ObjectId, ref: "Student", required: true },
+  crNo: { type: String, required: true },
+  date: { type: String, required: true }, // YYYY-MM-DD
+  status: { type: String, enum: ["present", "absent", "leave"], required: true },
+  note: { type: String, default: "" },
+  createdAt: { type: Date, default: Date.now },
+});
+
+attendanceSchema.index({ studentId: 1, date: 1 }, { unique: true });
+
+const Attendance = mongoose.model("Attendance", attendanceSchema);
+
 // ── Auth Middleware ──
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -216,6 +230,63 @@ app.get("/api/admin/receipts/:receiptNo", authMiddleware, async (req, res) => {
   }
 });
 
+// ── Attendance Endpoints ──
+app.get("/api/admin/attendance", authMiddleware, async (req, res) => {
+  try {
+    const { date } = req.query;
+    const query = date ? { date } : {};
+    const attendance = await Attendance.find(query).sort({ date: -1 });
+    res.json({ success: true, attendance });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch attendance" });
+  }
+});
+
+app.post("/api/admin/attendance", authMiddleware, async (req, res) => {
+  try {
+    const { studentId, date, status, note } = req.body;
+    const student = await Student.findById(studentId);
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+
+    const attendance = await Attendance.findOneAndUpdate(
+      { studentId, date },
+      { crNo: student.crNo, status, note },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    res.json({ success: true, attendance });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/admin/attendance/bulk", authMiddleware, async (req, res) => {
+  try {
+    const { date, records } = req.body;
+    const ops = records.map((r) => ({
+      updateOne: {
+        filter: { studentId: r.studentId, date },
+        update: { status: r.status, note: r.note || "", crNo: r.crNo },
+        upsert: true,
+      },
+    }));
+    await Attendance.bulkWrite(ops);
+    const attendance = await Attendance.find({ date });
+    res.json({ success: true, attendance });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/admin/attendance/:id", authMiddleware, async (req, res) => {
+  try {
+    await Attendance.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Attendance record deleted" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to delete attendance" });
+  }
+});
+
 // ── Reports Endpoint ──
 app.get("/api/admin/reports", authMiddleware, async (req, res) => {
   try {
@@ -227,6 +298,17 @@ app.get("/api/admin/reports", authMiddleware, async (req, res) => {
     const offlineTotal = await Payment.aggregate([{ $match: { mode: "offline" } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
     const courseWise = await Student.aggregate([{ $group: { _id: "$course", count: { $sum: 1 }, totalFee: { $sum: "$fee" }, totalPaid: { $sum: "$paid" } } }]);
 
+    // Attendance summary for current month
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const attendanceSummary = await Attendance.aggregate([
+      { $match: { createdAt: { $gte: startOfMonth } } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]);
+
+    const attendanceCounts = { present: 0, absent: 0, leave: 0 };
+    attendanceSummary.forEach((a) => { attendanceCounts[a._id] = a.count; });
+
     res.json({
       success: true,
       report: {
@@ -236,6 +318,7 @@ app.get("/api/admin/reports", authMiddleware, async (req, res) => {
         onlineTotal: onlineTotal[0]?.total || 0,
         offlineTotal: offlineTotal[0]?.total || 0,
         courseWise,
+        attendanceCounts,
       },
     });
   } catch (err) {
