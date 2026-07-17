@@ -47,6 +47,7 @@ const studentSchema = new mongoose.Schema({
   college: { type: String, default: "MLKPG कॉलेज बलरामपुर" },
   fee: { type: Number, default: 3000 },
   paid: { type: Number, default: 0 },
+  password: { type: String, default: "student123" },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -79,10 +80,52 @@ attendanceSchema.index({ studentId: 1, date: 1 }, { unique: true });
 
 const Attendance = mongoose.model("Attendance", attendanceSchema);
 
+// ── Content Schema ──
+const contentSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, default: "" },
+  course: { type: String, default: "" },
+  year: { type: String, default: "" },
+  type: { type: String, enum: ["video", "pdf", "link", "notes"], required: true },
+  url: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Content = mongoose.model("Content", contentSchema);
+
+// ── Quiz Schema ──
+const quizSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  course: { type: String, default: "" },
+  year: { type: String, default: "" },
+  questions: [
+    {
+      question: { type: String, required: true },
+      options: [{ type: String, required: true }],
+      answer: { type: Number, required: true }, // index of correct option
+    },
+  ],
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Quiz = mongoose.model("Quiz", quizSchema);
+
+// ── Quiz Attempt Schema ──
+const attemptSchema = new mongoose.Schema({
+  studentId: { type: mongoose.Schema.Types.ObjectId, ref: "Student", required: true },
+  quizId: { type: mongoose.Schema.Types.ObjectId, ref: "Quiz", required: true },
+  score: { type: Number, required: true },
+  total: { type: Number, required: true },
+  answers: [Number],
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Attempt = mongoose.model("Attempt", attemptSchema);
+
 // ── Auth Middleware ──
 function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || authHeader !== "Bearer admin-token-mlkpg") {
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (!authHeader || authHeader.trim() !== "Bearer admin-token-mlkpg") {
     return res.status(401).json({ success: false, error: "Unauthorized" });
   }
   next();
@@ -118,11 +161,28 @@ app.post("/api/enquiry", async (req, res) => {
 app.post("/api/admin/login", (req, res) => {
   const { username, password } = req.body;
 
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+  const cleanUsername = String(username || "").trim().toLowerCase();
+  const cleanPassword = String(password || "").trim();
+
+  if (cleanUsername === ADMIN_USERNAME && cleanPassword === ADMIN_PASSWORD) {
     return res.json({ success: true, token: "admin-token-mlkpg", message: "Login successful" });
   }
 
   res.status(401).json({ success: false, error: "Invalid credentials" });
+});
+
+// ── Student Login Endpoint ──
+app.post("/api/student/login", async (req, res) => {
+  try {
+    const { crNo, password } = req.body;
+    const student = await Student.findOne({ crNo: String(crNo || "").trim() });
+    if (!student || student.password !== String(password || "").trim()) {
+      return res.status(401).json({ success: false, error: "Invalid CR number or password" });
+    }
+    res.json({ success: true, token: `student-token-${student._id}`, student: { _id: student._id, crNo: student.crNo, name: student.name, course: student.course, year: student.year } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Login failed" });
+  }
 });
 
 // ── Admin: Get All Enquiries Endpoint ──
@@ -284,6 +344,163 @@ app.delete("/api/admin/attendance/:id", authMiddleware, async (req, res) => {
     res.json({ success: true, message: "Attendance record deleted" });
   } catch (err) {
     res.status(500).json({ success: false, error: "Failed to delete attendance" });
+  }
+});
+
+// ── Content Admin Endpoints ──
+app.get("/api/admin/contents", authMiddleware, async (req, res) => {
+  try {
+    const contents = await Content.find().sort({ createdAt: -1 });
+    res.json({ success: true, contents });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch contents" });
+  }
+});
+
+app.post("/api/admin/contents", authMiddleware, async (req, res) => {
+  try {
+    const content = await Content.create(req.body);
+    res.json({ success: true, content });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put("/api/admin/contents/:id", authMiddleware, async (req, res) => {
+  try {
+    const content = await Content.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!content) return res.status(404).json({ success: false, error: "Content not found" });
+    res.json({ success: true, content });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/admin/contents/:id", authMiddleware, async (req, res) => {
+  try {
+    await Content.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Content deleted" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to delete content" });
+  }
+});
+
+// ── Quiz Admin Endpoints ──
+app.get("/api/admin/quizzes", authMiddleware, async (req, res) => {
+  try {
+    const quizzes = await Quiz.find().sort({ createdAt: -1 });
+    res.json({ success: true, quizzes });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch quizzes" });
+  }
+});
+
+app.post("/api/admin/quizzes", authMiddleware, async (req, res) => {
+  try {
+    const quiz = await Quiz.create(req.body);
+    res.json({ success: true, quiz });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put("/api/admin/quizzes/:id", authMiddleware, async (req, res) => {
+  try {
+    const quiz = await Quiz.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!quiz) return res.status(404).json({ success: false, error: "Quiz not found" });
+    res.json({ success: true, quiz });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/admin/quizzes/:id", authMiddleware, async (req, res) => {
+  try {
+    await Quiz.findByIdAndDelete(req.params.id);
+    await Attempt.deleteMany({ quizId: req.params.id });
+    res.json({ success: true, message: "Quiz deleted" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to delete quiz" });
+  }
+});
+
+// ── Student Dashboard Endpoints ──
+function studentAuth(req, res, next) {
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (!authHeader || !authHeader.startsWith("student-token-")) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+  req.studentId = authHeader.replace("student-token-", "").trim();
+  next();
+}
+
+app.get("/api/student/me", studentAuth, async (req, res) => {
+  try {
+    const student = await Student.findById(req.studentId).select("-password");
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+    res.json({ success: true, student });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch student" });
+  }
+});
+
+app.get("/api/student/contents", studentAuth, async (req, res) => {
+  try {
+    const student = await Student.findById(req.studentId);
+    const query = student?.course ? { $or: [{ course: "" }, { course: student.course }] } : {};
+    const contents = await Content.find(query).sort({ createdAt: -1 });
+    res.json({ success: true, contents });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch contents" });
+  }
+});
+
+app.get("/api/student/quizzes", studentAuth, async (req, res) => {
+  try {
+    const student = await Student.findById(req.studentId);
+    const query = student?.course ? { $or: [{ course: "" }, { course: student.course }] } : {};
+    const quizzes = await Quiz.find(query).sort({ createdAt: -1 });
+    const attempts = await Attempt.find({ studentId: req.studentId });
+    const attemptedQuizIds = attempts.map((a) => a.quizId.toString());
+    res.json({ success: true, quizzes: quizzes.map((q) => ({ ...q.toObject(), attempted: attemptedQuizIds.includes(q._id.toString()) })), attempts });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch quizzes" });
+  }
+});
+
+app.post("/api/student/quizzes/:id/attempt", studentAuth, async (req, res) => {
+  try {
+    const quiz = await Quiz.findById(req.params.id);
+    if (!quiz) return res.status(404).json({ success: false, error: "Quiz not found" });
+
+    const { answers } = req.body;
+    let score = 0;
+    quiz.questions.forEach((q, i) => {
+      if (answers[i] === q.answer) score++;
+    });
+
+    const attempt = await Attempt.create({ studentId: req.studentId, quizId: quiz._id, score, total: quiz.questions.length, answers });
+    res.json({ success: true, attempt });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/student/attendance", studentAuth, async (req, res) => {
+  try {
+    const attendance = await Attendance.find({ studentId: req.studentId }).sort({ date: -1 });
+    res.json({ success: true, attendance });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch attendance" });
+  }
+});
+
+app.get("/api/student/payments", studentAuth, async (req, res) => {
+  try {
+    const payments = await Payment.find({ studentId: req.studentId }).sort({ createdAt: -1 });
+    res.json({ success: true, payments });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch payments" });
   }
 });
 
