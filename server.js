@@ -34,6 +34,46 @@ const enquirySchema = new mongoose.Schema({
 
 const Enquiry = mongoose.model("Enquiry", enquirySchema);
 
+// ── Student Schema ──
+const studentSchema = new mongoose.Schema({
+  crNo: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  fatherName: { type: String, default: "" },
+  email: { type: String, default: "" },
+  phone: { type: String, required: true },
+  address: { type: String, default: "" },
+  course: { type: String, default: "" },
+  year: { type: String, default: "" },
+  college: { type: String, default: "MLKPG कॉलेज बलरामपुर" },
+  fee: { type: Number, default: 3000 },
+  paid: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Student = mongoose.model("Student", studentSchema);
+
+// ── Payment Schema ──
+const paymentSchema = new mongoose.Schema({
+  studentId: { type: mongoose.Schema.Types.ObjectId, ref: "Student", required: true },
+  crNo: { type: String, required: true },
+  amount: { type: Number, required: true },
+  mode: { type: String, enum: ["online", "offline"], required: true },
+  receiptNo: { type: String, required: true, unique: true },
+  note: { type: String, default: "" },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Payment = mongoose.model("Payment", paymentSchema);
+
+// ── Auth Middleware ──
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || authHeader !== "Bearer admin-token-mlkpg") {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+  next();
+}
+
 // ── Enquiry Form Endpoint ──
 app.post("/api/enquiry", async (req, res) => {
   const { name, phone, course, year, college, message } = req.body;
@@ -72,13 +112,7 @@ app.post("/api/admin/login", (req, res) => {
 });
 
 // ── Admin: Get All Enquiries Endpoint ──
-app.get("/api/admin/enquiries", async (req, res) => {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || authHeader !== "Bearer admin-token-mlkpg") {
-    return res.status(401).json({ success: false, error: "Unauthorized" });
-  }
-
+app.get("/api/admin/enquiries", authMiddleware, async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ success: false, error: "Database not connected" });
@@ -89,6 +123,123 @@ app.get("/api/admin/enquiries", async (req, res) => {
   } catch (err) {
     console.error("❌ Error fetching enquiries:", err.message);
     res.status(500).json({ success: false, error: "Failed to fetch enquiries" });
+  }
+});
+
+// ── Student CRUD Endpoints ──
+app.get("/api/admin/students", authMiddleware, async (req, res) => {
+  try {
+    const students = await Student.find().sort({ createdAt: -1 });
+    res.json({ success: true, students });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch students" });
+  }
+});
+
+app.get("/api/admin/students/:id", authMiddleware, async (req, res) => {
+  try {
+    const student = await Student.findById(req.params.id);
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+    const payments = await Payment.find({ studentId: student._id }).sort({ createdAt: -1 });
+    res.json({ success: true, student, payments });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch student" });
+  }
+});
+
+app.post("/api/admin/students", authMiddleware, async (req, res) => {
+  try {
+    const student = await Student.create(req.body);
+    res.json({ success: true, student });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.put("/api/admin/students/:id", authMiddleware, async (req, res) => {
+  try {
+    const student = await Student.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+    res.json({ success: true, student });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/admin/students/:id", authMiddleware, async (req, res) => {
+  try {
+    const student = await Student.findByIdAndDelete(req.params.id);
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+    await Payment.deleteMany({ studentId: student._id });
+    res.json({ success: true, message: "Student deleted" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to delete student" });
+  }
+});
+
+// ── Payment Endpoints ──
+app.get("/api/admin/payments", authMiddleware, async (req, res) => {
+  try {
+    const payments = await Payment.find().sort({ createdAt: -1 });
+    res.json({ success: true, payments });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch payments" });
+  }
+});
+
+app.post("/api/admin/payments", authMiddleware, async (req, res) => {
+  try {
+    const { studentId, amount, mode, note } = req.body;
+    const student = await Student.findById(studentId);
+    if (!student) return res.status(404).json({ success: false, error: "Student not found" });
+
+    const receiptNo = `RCP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const payment = await Payment.create({ studentId, crNo: student.crNo, amount, mode, receiptNo, note });
+
+    student.paid = (student.paid || 0) + Number(amount);
+    await student.save();
+
+    res.json({ success: true, payment, student });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/admin/receipts/:receiptNo", authMiddleware, async (req, res) => {
+  try {
+    const payment = await Payment.findOne({ receiptNo: req.params.receiptNo });
+    if (!payment) return res.status(404).json({ success: false, error: "Receipt not found" });
+    const student = await Student.findById(payment.studentId);
+    res.json({ success: true, payment, student });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to fetch receipt" });
+  }
+});
+
+// ── Reports Endpoint ──
+app.get("/api/admin/reports", authMiddleware, async (req, res) => {
+  try {
+    const totalStudents = await Student.countDocuments();
+    const totalPayments = await Payment.aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }]);
+    const totalCollected = totalPayments[0]?.total || 0;
+    const totalDue = (totalStudents * 3000) - totalCollected;
+    const onlineTotal = await Payment.aggregate([{ $match: { mode: "online" } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
+    const offlineTotal = await Payment.aggregate([{ $match: { mode: "offline" } }, { $group: { _id: null, total: { $sum: "$amount" } } }]);
+    const courseWise = await Student.aggregate([{ $group: { _id: "$course", count: { $sum: 1 }, totalFee: { $sum: "$fee" }, totalPaid: { $sum: "$paid" } } }]);
+
+    res.json({
+      success: true,
+      report: {
+        totalStudents,
+        totalCollected,
+        totalDue,
+        onlineTotal: onlineTotal[0]?.total || 0,
+        offlineTotal: offlineTotal[0]?.total || 0,
+        courseWise,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Failed to generate report" });
   }
 });
 
