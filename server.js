@@ -261,13 +261,33 @@ app.get("/api/admin/payments", authMiddleware, async (req, res) => {
   }
 });
 
+// ── Generate Receipt Number: Fullstack{year}{sequence} ──
+async function generateReceiptNo() {
+  const currentYear = new Date().getFullYear();
+  const prefix = `Fullstack${currentYear}`;
+  // Find the latest payment with this prefix
+  const latestPayment = await Payment.findOne({ receiptNo: { $regex: `^${prefix}` } }).sort({ createdAt: -1 });
+  let maxSeq = 0;
+  if (latestPayment) {
+    const seq = parseInt(latestPayment.receiptNo.slice(prefix.length), 10);
+    if (!isNaN(seq)) maxSeq = seq;
+  }
+  // Also check all payments with this prefix to find the true max
+  const allPayments = await Payment.find({ receiptNo: { $regex: `^${prefix}` } }, { receiptNo: 1 });
+  allPayments.forEach((p) => {
+    const seq = parseInt(p.receiptNo.slice(prefix.length), 10);
+    if (!isNaN(seq) && seq > maxSeq) maxSeq = seq;
+  });
+  return `${prefix}${maxSeq + 1}`;
+}
+
 app.post("/api/admin/payments", authMiddleware, async (req, res) => {
   try {
     const { studentId, amount, mode, note } = req.body;
     const student = await Student.findById(studentId);
     if (!student) return res.status(404).json({ success: false, error: "Student not found" });
 
-    const receiptNo = `RCP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const receiptNo = await generateReceiptNo();
     const payment = await Payment.create({ studentId, crNo: student.crNo, amount, mode, receiptNo, note });
 
     student.paid = (student.paid || 0) + Number(amount);
@@ -287,6 +307,81 @@ app.get("/api/admin/receipts/:receiptNo", authMiddleware, async (req, res) => {
     res.json({ success: true, payment, student });
   } catch (err) {
     res.status(500).json({ success: false, error: "Failed to fetch receipt" });
+  }
+});
+
+// ── Download Receipt as HTML ──
+app.get("/api/admin/receipts/:receiptNo/download", async (req, res) => {
+  try {
+    const payment = await Payment.findOne({ receiptNo: req.params.receiptNo });
+    if (!payment) return res.status(404).send("Receipt not found");
+    const student = await Student.findById(payment.studentId);
+    if (!student) return res.status(404).send("Student not found");
+
+    const date = new Date(payment.createdAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+    const currentYear = new Date().getFullYear();
+    const modeLabel = payment.mode === "online" ? "Online" : "Offline";
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Receipt ${payment.receiptNo}</title>
+<style>
+@page { size: A4; margin: 15mm 12mm; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', Arial, Helvetica, sans-serif; color: #1a1a2e; background: #fff; padding: 20px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.receipt-wrapper { max-width: 720px; margin: 0 auto; border: 2px solid #2563eb; border-radius: 12px; overflow: hidden; background: #fff; }
+.receipt-header { text-align: center; padding: 28px 24px 20px; background: linear-gradient(135deg, #f0f4ff 0%, #e8eeff 100%); border-bottom: 3px solid #2563eb; }
+.receipt-header h3 { font-size: 1.1rem; color: #1a1a2e; margin-bottom: 4px; font-weight: 700; }
+.receipt-header p { font-size: 0.85rem; color: #475569; font-weight: 500; }
+.receipt-table { width: 100%; border-collapse: collapse; margin-top: 16px; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; }
+.receipt-table td, .receipt-table th { border: 1px solid #e2e8f0; padding: 10px 14px; font-size: 0.88rem; color: #334155; }
+.receipt-table td strong { color: #1e293b; }
+.receipt-table th { background: #2563eb; color: #fff; font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; }
+.receipt-table tbody tr:nth-child(even) { background: #f8fafc; }
+.receipt-note { text-align: center; font-size: 0.78rem; color: #94a3b8; margin-top: 20px; padding-top: 16px; border-top: 1px dashed #e2e8f0; }
+.receipt-footer { text-align: center; padding: 16px 24px; background: #f8fafc; border-top: 1px solid #e2e8f0; font-size: 0.75rem; color: #64748b; }
+</style>
+</head>
+<body>
+<div class="receipt-wrapper">
+  <div class="receipt-header">
+    <h3>M.L.K. (P.G.) COLLEGE, BALRAMPUR (U.P.) - 271201</h3>
+    <p>Course Fee Receipt ${currentYear}-${currentYear + 1}</p>
+  </div>
+  <div style="padding: 0 16px;">
+    <table class="receipt-table">
+      <tbody>
+        <tr><td><strong>Receipt No.</strong></td><td>${payment.receiptNo}</td><td><strong>Date</strong></td><td>${date}</td></tr>
+        <tr><td><strong>Student Name</strong></td><td colspan="3">${student.name}</td></tr>
+        <tr><td><strong>Father's Name</strong></td><td colspan="3">${student.fatherName || "N/A"}</td></tr>
+        <tr><td><strong>CR No.</strong></td><td>${student.crNo}</td><td><strong>Phone</strong></td><td>${student.phone}</td></tr>
+        <tr><td><strong>Course</strong></td><td>${student.course || "N/A"}</td><td><strong>Year</strong></td><td>${student.year || "N/A"}</td></tr>
+      </tbody>
+    </table>
+    <table class="receipt-table">
+      <thead><tr><th>Particulars</th><th>Amount</th></tr></thead>
+      <tbody>
+        <tr><td>FullStack Development Payment (${modeLabel})</td><td>\u20B9${payment.amount}</td></tr>
+        <tr><td><strong>Total</strong></td><td><strong>\u20B9${payment.amount}</strong></td></tr>
+      </tbody>
+    </table>
+    <p class="receipt-note">Note: This is a computer generated receipt.</p>
+  </div>
+  <div class="receipt-footer">
+    <p>MLKPG College, Balrampur, Uttar Pradesh - 271201</p>
+    <p>Contact: 7800356804 | This is a computer generated receipt.</p>
+  </div>
+</div>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html");
+    res.setHeader("Content-Disposition", `attachment; filename="Receipt-${payment.receiptNo}.html"`);
+    res.send(html);
+  } catch (err) {
+    res.status(500).send("Failed to generate receipt");
   }
 });
 
